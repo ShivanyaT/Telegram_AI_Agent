@@ -247,12 +247,14 @@ export const JobHandlers = {
   /**
    * Post scheduled message to group
    */
-  postToGroup: async (
-    groupId: string,
-    message: string
-  ): Promise<void> => {
-    console.log(`[Job] Posting to ${groupId}: ${message}`);
-    // TODO: Actually post via Telegram
+  postToGroup: async (groupId: string, message: string): Promise<void> => {
+    const token = process.env.TELEGRAM_BOT_TOKEN;
+    await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: groupId, text: message }),
+    });
+    console.log(`[Job] Posted to ${groupId}: ${message}`);
   },
 
   /**

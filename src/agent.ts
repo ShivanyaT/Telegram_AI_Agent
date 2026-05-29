@@ -86,6 +86,10 @@ ${this.formatAvailableTools(memoryContext.toolsContext.availableTools)}
 ### Conversation History
 ${this.formatConversationHistory(conversationHistory)}
 
+## Current Chat ID
+${currentGroupId}
+(Use this exact ID when calling telegram tool to send messages to the current user)
+
 ### User's Current Message
 \`\`\`
 ${userMessage}
@@ -93,11 +97,18 @@ ${userMessage}
 
 ## Instructions
 1. Understand the user's intent
-2. Consult relevant memory and preferences
-3. Decide which tools (if any) to use
-4. Respond naturally and helpfully
+2. Decide which tools (if any) to use
+3. Execute tools silently using [TOOL_CALL] blocks
+4. Respond to the user ONLY with the final answer — no internal reasoning, no explanations of what you're doing, no "I will now..." statements
+5. Keep responses short and natural
 
-## Your Response`;
+## Your Response
+If you need to use a tool, output it in this exact format:
+[TOOL_CALL]
+{"toolName": "telegram", "params": {"action": "send_message", "groupId": "CHAT_ID", "content": "your message"}}
+[/TOOL_CALL]
+
+Then explain what you did. Otherwise just respond normally.`;
 
     // Add RAG context if available
     if (ragContext && ragContext.length > 0) {
@@ -114,15 +125,35 @@ ${userMessage}
    * Call the LLM provider (placeholder)
    */
   private async callLLM(prompt: string): Promise<any> {
-    console.log(`[Agent] Processing with ${this.llmProvider}/${this.llmModel}...`);
+  console.log(`[Agent] Processing with ${this.llmProvider}/${this.llmModel}...`);
 
-    // Mock response for now
-    return {
-      text: "I understand your request. How can I help you today?",
-      confidence: 0.8,
-      reasoning: 'Matched user intent to available context.',
-    };
+  const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model: this.llmModel,
+      messages: [
+        { role: 'user', content: prompt }
+      ],
+      temperature: 0.7,
+    }),
+  });
+
+  const data = await response.json() as any;
+
+  if (!response.ok) {
+    throw new Error(`LLM API error: ${data.error?.message || 'Unknown error'}`);
   }
+
+  return {
+    text: data.choices[0].message.content,
+    confidence: 0.8,
+    reasoning: 'Response from LLM.',
+  };
+}
 
   /**
    * Parse LLM response to extract tool calls

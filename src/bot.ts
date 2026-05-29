@@ -12,7 +12,7 @@
 
 import TelegramBot, { Message } from 'node-telegram-bot-api';
 import { v4 as uuidv4 } from 'uuid';
-import { AgentInput, BotError, ErrorCode } from './types';
+import { AgentInput, BotError, ErrorCode, ConversationTurn } from './types';
 import Agent from './agent';
 import MemoryManager from './memory';
 import RAGManager from './rag';
@@ -23,6 +23,7 @@ import {
   NotionTool,
   AbstractTool,
 } from './tools';
+import scheduler from './scheduler';
 
 /**
  * TelegramBotClient - Main bot interface
@@ -35,6 +36,7 @@ export class TelegramBotClient {
   private scheduler: Scheduler;
   private tools: Map<string, AbstractTool> = new Map();
   private botId: string;
+  private conversationHistories: Map<number, ConversationTurn[]> = new Map();
 
   constructor(
     token: string,
@@ -76,14 +78,14 @@ export class TelegramBotClient {
    * Register available tools
    */
   private registerTools(): void {
-    this.tools.set('telegram', new TelegramTool());
+    this.tools.set('telegram', new TelegramTool(this.scheduler));
     this.tools.set('github', new GitHubTool());
     this.tools.set('notion', new NotionTool());
 
     console.log(
       `[Bot] Registered ${this.tools.size} tools: ${Array.from(this.tools.keys()).join(', ')}`
     );
-  }
+  } 
 
   /**
    * Set up message and event handlers
@@ -124,10 +126,12 @@ export class TelegramBotClient {
 
     console.log(`[Bot] Message from ${from.first_name}: ${text.substring(0, 50)}`);
 
+    const history = this.conversationHistories.get(chat.id) || [];
+    history.push({ role: 'user', content: text, timestamp: new Date() });
     // Build agent input
     const agentInput: AgentInput = {
       userMessage: text,
-      conversationHistory: [], // TODO: Load conversation history
+      conversationHistory: history, // TODO: Load conversation history
       memoryContext: await this.memory.getMemoryContext(),
       ragContext: [], // TODO: Query RAG if needed
       currentGroupId: chat.id.toString(),
@@ -135,9 +139,17 @@ export class TelegramBotClient {
 
     // Process with agent
     const agentOutput = await this.agent.processMessage(agentInput);
-
+    history.push({ role: 'assistant', content: agentOutput.response, timestamp: new Date() });
+    this.conversationHistories.set(chat.id, history.slice(-10));
     // Send response
-    await this.bot.sendMessage(chat.id, agentOutput.response);
+    // Clean tool call blocks from response before sending
+    const cleanResponse = agentOutput.response
+      .replace(/\[TOOL_CALL\][\s\S]*?\[\/TOOL_CALL\]/g, '')
+      .trim();
+
+    if (cleanResponse) {
+      await this.bot.sendMessage(chat.id, cleanResponse);
+    }
 
     // Log to daily memory
     await this.memory.logDailyEvent(`User: ${text} | Bot: ${agentOutput.response}`);
@@ -153,14 +165,11 @@ export class TelegramBotClient {
 
         const result = await tool.execute(toolCall.toolInput);
         console.log(`[Bot] Tool execution: ${toolCall.toolName} - Success: ${result.success}`);
-
-        if (result.result) {
-          // Optionally send tool result to user
-          const resultText = JSON.stringify(result.result, null, 2);
-          if (resultText.length < 1000) {
-            await this.bot.sendMessage(chat.id, `Result:\n\`\`\`\n${resultText}\n\`\`\``);
-          }
+        if (!result.success) {
+          console.log(`[Bot] Tool error: ${result.error}`);
+          console.log(`[Bot] Tool input was:`, JSON.stringify(toolCall.toolInput));
         }
+        
       } catch (error) {
         console.error('[Bot] Tool execution error:', error);
       }

@@ -8,7 +8,7 @@
  * - Notion tool (create pages)
  * - Easy to add more tools
  */
-
+import Scheduler, { JobHandlers } from './scheduler';
 import { v4 as uuidv4 } from 'uuid';
 import {
   BaseTool,
@@ -94,6 +94,12 @@ export abstract class AbstractTool implements BaseTool {
  * TELEGRAM TOOL - Send/receive messages, schedule posts
  */
 export class TelegramTool extends AbstractTool {
+  private scheduler: Scheduler;
+  
+  constructor(scheduler: Scheduler) {
+    super();
+    this.scheduler = scheduler;
+  }
   name = 'telegram';
   description =
     'Send messages, retrieve group history, schedule reminders, manage Telegram interactions';
@@ -145,6 +151,10 @@ export class TelegramTool extends AbstractTool {
           return this.retrieveMessages(input, executionId);
 
         case 'schedule_message':
+        case 'schedule_reminder': // Accept both names
+          // Normalize parameter names
+          if (input.chat_id && !input.groupId) input.groupId = input.chat_id;
+          if (input.message && !input.content) input.content = input.message;
           return this.scheduleMessage(input, executionId);
 
         default:
@@ -159,13 +169,30 @@ export class TelegramTool extends AbstractTool {
     input: Record<string, unknown>,
     executionId: string
   ): Promise<ToolResult> {
-    // TODO: Implement actual Telegram API call
-    console.log(`[Telegram] Sending message: ${input.content}`);
+    const token = process.env.TELEGRAM_BOT_TOKEN;
+    const chatId = input.groupId as string;
+    const content = input.content as string;
 
-    return this.success(
-      { messageId: uuidv4(), sent: true },
-      executionId
+    if (!chatId || !content) {
+      return this.error('groupId and content are required', executionId);
+    }
+
+    const response = await fetch(
+      `https://api.telegram.org/bot${token}/sendMessage`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: chatId, text: content }),
+      }
     );
+
+    const data = await response.json() as any;
+
+    if (!data.ok) {
+      return this.error(`Telegram API error: ${data.description}`, executionId);
+    }
+
+    return this.success({ messageId: data.result.message_id, sent: true }, executionId);
   }
 
   private async retrieveMessages(
@@ -185,16 +212,50 @@ export class TelegramTool extends AbstractTool {
     input: Record<string, unknown>,
     executionId: string
   ): Promise<ToolResult> {
-    // TODO: Implement message scheduling
-    console.log(`[Telegram] Scheduling message for: ${input.scheduledFor}`);
+  // Normalize parameter names (LLM uses different names sometimes)
+    const groupId = (input.groupId || input.chat_id) as string;
+    const content = (input.content || input.message) as string;
+    const timeStr = (input.scheduledFor || input.time) as string;
 
-    return this.success(
-      { jobId: uuidv4(), scheduled: true },
-      executionId
+    if (!groupId || !content || !timeStr) {
+      return this.error('groupId, content and time are required', executionId);
+    }
+
+    // Handle "X seconds" format
+    if (timeStr.includes('second')) {
+      const seconds = parseInt(timeStr);
+      setTimeout(async () => {
+        await JobHandlers.postToGroup(groupId, content);
+      }, seconds * 1000);
+      return this.success({ scheduled: true, method: 'timeout', delay: `${seconds}s` }, executionId);
+    }
+
+    // Handle "X minutes" format
+    if (timeStr.includes('minute')) {
+      const minutes = parseInt(timeStr);
+      setTimeout(async () => {
+        await JobHandlers.postToGroup(groupId, content);
+      }, minutes * 60 * 1000);
+      return this.success({ scheduled: true, method: 'timeout', delay: `${minutes}m` }, executionId);
+    }
+
+  // Handle HH:MM or ISO timestamp
+    const date = new Date(timeStr);
+    const mins = date.getMinutes();
+    const hrs = date.getHours();
+    const cronExpression = `${mins} ${hrs} * * *`;
+
+    await this.scheduler.registerJob(
+      `send-message-${executionId}`,
+      cronExpression,
+      async () => {
+        await JobHandlers.postToGroup(groupId, content);
+      }
     );
+
+    return this.success({ scheduled: true, method: 'cron', cronExpression }, executionId);
   }
 }
-
 /**
  * GITHUB TOOL - Create issues, search repositories
  */
